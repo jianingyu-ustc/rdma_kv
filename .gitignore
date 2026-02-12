@@ -1,0 +1,115 @@
+# =========================
+# Build directories
+# =========================
+build/
+cmake-build-*/
+out/
+
+# =========================
+# Compiled files
+# =========================
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+
+# =========================
+# CMake generated
+# =========================
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+_deps/
+CMakeScripts/
+*.cmake
+!CMakeLists.txt
+
+# =========================
+# IDE & Editor
+# =========================
+# VSCode
+.vscode/
+*.code-workspace
+
+# CLion
+.idea/
+*.iml
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# =========================
+# Debug files
+# =========================
+*.dSYM/
+*.su
+*.idb
+*.pdb
+core
+core.*
+vgcore.*
+
+# =========================
+# Binary outputs
+# =========================
+bin/
+lib/
+kv_server
+kv_client
+test_*
+
+# =========================
+# Logs & temp files
+# =========================
+*.log
+*.tmp
+*.temp
+*.bak
+
+# =========================
+# OS generated
+# =========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =========================
+# Documentation build
+# =========================
+docs/_build/
+docs/html/
+docs/latex/
+doxygen/
+
+# =========================
+# Coverage & profiling
+# =========================
+*.gcno
+*.gcda
+*.gcov
+coverage/
+lcov.info

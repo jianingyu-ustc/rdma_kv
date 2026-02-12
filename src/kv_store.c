@@ -27,7 +27,7 @@ static void* server_worker_thread(void *arg) {
         if (server->config.conn_mode == CONN_MODE_SOCKET) {
             ret = rdma_socket_accept(&server->rdma_ctx, &client_ctx);
         } else {
-            ret = rdma_accept(&server->rdma_ctx, &client_ctx);
+            ret = rdma_cm_accept(&server->rdma_ctx, &client_ctx);
         }
         
         if (ret != 0) {
@@ -141,7 +141,7 @@ static void* server_worker_thread(void *arg) {
         if (server->config.conn_mode == CONN_MODE_SOCKET) {
             rdma_socket_disconnect(&client_ctx);
         } else {
-            rdma_disconnect(&client_ctx);
+            rdma_cm_disconnect(&client_ctx);
         }
         printf("Client disconnected\n");
     }
@@ -220,7 +220,7 @@ int kv_server_start(kv_server_t *server) {
         ret = rdma_socket_listen(&server->rdma_ctx, server->config.bind_ip, 
                                  server->config.port, ib_dev);
     } else {
-        ret = rdma_listen(&server->rdma_ctx, server->config.bind_ip, 
+        ret = rdma_cm_listen(&server->rdma_ctx, server->config.bind_ip, 
                           server->config.port);
     }
     
@@ -300,7 +300,7 @@ int kv_client_connect(kv_client_t *client, const char *server_ip, int port) {
     client->server_port = port;
     
     // 建立 RDMA 连接
-    if (rdma_connect(&client->rdma_ctx, server_ip, port) != 0) {
+    if (rdma_cm_connect(&client->rdma_ctx, server_ip, port) != 0) {
         return -1;
     }
     
@@ -308,14 +308,14 @@ int kv_client_connect(kv_client_t *client, const char *server_ip, int port) {
     if (rdma_register_memory(&client->rdma_ctx,
                             memory_pool_get_base(client->mem_pool),
                             memory_pool_get_size(client->mem_pool)) != 0) {
-        rdma_disconnect(&client->rdma_ctx);
+        rdma_cm_disconnect(&client->rdma_ctx);
         return -1;
     }
     
     // 接收服务端的远程内存信息
     char recv_buf[1024];
     if (rdma_recv(&client->rdma_ctx, recv_buf, sizeof(recv_buf)) != 0) {
-        rdma_disconnect(&client->rdma_ctx);
+        rdma_cm_disconnect(&client->rdma_ctx);
         return -1;
     }
     
@@ -338,7 +338,7 @@ void kv_client_disconnect(kv_client_t *client) {
     if (client->rdma_ctx.conn_mode == CONN_MODE_SOCKET) {
         rdma_socket_disconnect(&client->rdma_ctx);
     } else {
-        rdma_disconnect(&client->rdma_ctx);
+        rdma_cm_disconnect(&client->rdma_ctx);
     }
     client->connected = false;
 }

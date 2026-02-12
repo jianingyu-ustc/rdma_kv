@@ -105,10 +105,10 @@ int rdma_init_context(rdma_context_t *ctx, conn_mode_t mode);
 void rdma_destroy_context(rdma_context_t *ctx);
 
 // RDMA CM 建链（默认方式）
-int rdma_connect(rdma_context_t *ctx, const char *server_ip, int port);
-int rdma_listen(rdma_context_t *ctx, const char *bind_ip, int port);
-int rdma_accept(rdma_context_t *ctx, rdma_context_t *client_ctx);
-void rdma_disconnect(rdma_context_t *ctx);
+int rdma_cm_connect(rdma_context_t *ctx, const char *server_ip, int port);
+int rdma_cm_listen(rdma_context_t *ctx, const char *bind_ip, int port);
+int rdma_cm_accept(rdma_context_t *ctx, rdma_context_t *client_ctx);
+void rdma_cm_disconnect(rdma_context_t *ctx);
 
 // Socket 建链方式
 int rdma_socket_connect(rdma_context_t *ctx, const char *server_ip, int port, const char *ib_dev);

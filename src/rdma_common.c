@@ -121,7 +121,7 @@ static int setup_rdma_resources(rdma_context_t *ctx) {
 }
 
 // 客户端连接到服务端
-int rdma_connect(rdma_context_t *ctx, const char *server_ip, int port) {
+int rdma_cm_connect(rdma_context_t *ctx, const char *server_ip, int port) {
     struct rdma_cm_event *event;
     struct sockaddr_in addr;
     
@@ -208,7 +208,7 @@ int rdma_connect(rdma_context_t *ctx, const char *server_ip, int port) {
 }
 
 // 服务端监听
-int rdma_listen(rdma_context_t *ctx, const char *bind_ip, int port) {
+int rdma_cm_listen(rdma_context_t *ctx, const char *bind_ip, int port) {
     struct sockaddr_in addr;
     
     // 创建 CM ID
@@ -243,7 +243,7 @@ int rdma_listen(rdma_context_t *ctx, const char *bind_ip, int port) {
 }
 
 // 接受客户端连接
-int rdma_accept(rdma_context_t *listen_ctx, rdma_context_t *client_ctx) {
+int rdma_cm_accept(rdma_context_t *listen_ctx, rdma_context_t *client_ctx) {
     struct rdma_cm_event *event;
     
     // 等待连接请求
@@ -298,7 +298,7 @@ int rdma_accept(rdma_context_t *listen_ctx, rdma_context_t *client_ctx) {
 }
 
 // 断开连接 (RDMA CM 模式)
-void rdma_disconnect(rdma_context_t *ctx) {
+void rdma_cm_disconnect(rdma_context_t *ctx) {
     if (ctx->connected && ctx->cm_id) {
         rdma_disconnect(ctx->cm_id);
         ctx->connected = false;
@@ -507,7 +507,6 @@ int rdma_modify_qp_to_rtr(rdma_context_t *ctx) {
             .src_path_bits = 0,
             .port_num = ctx->port_num,
             .grh = {
-                .dgid = {0},
                 .flow_label = 0,
                 .sgid_index = 0,
                 .hop_limit = 1,
@@ -515,7 +514,8 @@ int rdma_modify_qp_to_rtr(rdma_context_t *ctx) {
             },
         },
     };
-    
+    memset(&attr.ah_attr.grh.dgid, 0, sizeof(attr.ah_attr.grh.dgid));
+
     // 设置远程 GID
     memcpy(&attr.ah_attr.grh.dgid, ctx->remote_info.gid, 16);
     
