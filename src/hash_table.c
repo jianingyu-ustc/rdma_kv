@@ -288,6 +288,78 @@ kv_result_t hash_table_put(hash_table_t *table, const char *key, size_t key_len,
     return result;
 }
 
+// PUT 操作（使用预分配的内存，用于大数据 RDMA Write 场景）
+kv_result_t hash_table_put_with_allocated(hash_table_t *table, 
+                                          const char *key, size_t key_len,
+                                          void *value_ptr, size_t value_len,
+                                          uint64_t value_offset) {
+    kv_result_t result = {0};
+    
+    if (!table || !key || key_len == 0) {
+        result.status = KV_ERR_INTERNAL;
+        return result;
+    }
+    if (key_len > MAX_KEY_LENGTH) {
+        result.status = KV_ERR_KEY_TOO_LONG;
+        return result;
+    }
+    if (value_len > MAX_VALUE_LENGTH) {
+        result.status = KV_ERR_VALUE_TOO_LONG;
+        return result;
+    }
+    
+    uint64_t hash = hash_key(key, key_len);
+    size_t bucket_idx = hash % table->num_buckets;
+    hash_bucket_t *bucket = &table->buckets[bucket_idx];
+    
+    pthread_rwlock_wrlock(&bucket->lock);
+    
+    // 查找现有条目
+    hash_entry_t *entry = find_entry_in_bucket(bucket, key, key_len);
+    
+    if (entry) {
+        // 更新现有条目（旧值内存由调用者处理或泄露，简化实现）
+        entry->value_offset = value_offset;
+        entry->value_len = value_len;
+        entry->version++;
+        
+        result.version = entry->version;
+    } else {
+        // 插入新条目
+        if (bucket->count >= bucket->capacity) {
+            if (expand_bucket(bucket, table->mem_pool) != 0) {
+                // 分配的内存需要释放
+                memory_pool_free(table->mem_pool, value_ptr);
+                result.status = KV_ERR_NO_MEMORY;
+                pthread_rwlock_unlock(&bucket->lock);
+                return result;
+            }
+            __sync_fetch_and_add(&table->collision_count, 1);
+        }
+        
+        // 填充新条目
+        entry = &bucket->entries[bucket->count];
+        entry->key_len = key_len;
+        memcpy(entry->key, key, key_len);
+        entry->value_offset = value_offset;
+        entry->value_len = value_len;
+        entry->version = 1;
+        entry->state = ENTRY_OCCUPIED;
+        
+        bucket->count++;
+        __sync_fetch_and_add(&table->num_entries, 1);
+        
+        result.version = 1;
+    }
+    
+    result.status = KV_OK;
+    __sync_fetch_and_add(&table->put_count, 1);
+    
+    pthread_rwlock_unlock(&bucket->lock);
+    
+    return result;
+}
+
 // DELETE 操作
 kv_result_t hash_table_delete(hash_table_t *table, const char *key, size_t key_len) {
     kv_result_t result = {0};

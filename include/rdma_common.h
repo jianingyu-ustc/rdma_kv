@@ -44,6 +44,8 @@ typedef enum {
     MSG_TYPE_GET_RESPONSE,
     MSG_TYPE_PUT_REQUEST,
     MSG_TYPE_PUT_RESPONSE,
+    MSG_TYPE_PUT_ALLOC_RESPONSE,  // 大数据 PUT: 返回分配的远程地址
+    MSG_TYPE_PUT_COMPLETE,        // 大数据 PUT: RDMA Write 完成通知
     MSG_TYPE_DELETE_REQUEST,
     MSG_TYPE_DELETE_RESPONSE,
     MSG_TYPE_CAS_REQUEST,
@@ -51,12 +53,27 @@ typedef enum {
     MSG_TYPE_RDMA_INFO,      // 交换 RDMA 内存信息
 } rdma_msg_type_t;
 
+// 大数据 PUT 分配响应信息
+typedef struct {
+    uint64_t remote_addr;    // 远程地址（用于 RDMA Write）
+    uint32_t rkey;           // 远程密钥
+    uint64_t value_offset;   // 在内存池中的偏移（Server 内部使用）
+} __attribute__((packed)) put_alloc_info_t;
+
 // RDMA 内存区域信息
 typedef struct {
     uint64_t addr;
     uint32_t rkey;
     uint32_t size;
 } rdma_mem_info_t;
+
+// 客户端专用写缓冲区信息（用于 1 RTT 优化）
+// 连接时服务端分配，客户端可直接用 write_imm 写入
+typedef struct {
+    uint64_t write_buf_addr;     // 客户端写入缓冲区地址
+    uint32_t write_buf_rkey;     // 远程密钥
+    uint32_t write_buf_size;     // 缓冲区大小
+} client_write_buf_t;
 
 // RDMA 消息头
 typedef struct {
@@ -132,6 +149,9 @@ int rdma_read(rdma_context_t *ctx, void *local_buf, size_t size,
               uint64_t remote_addr, uint32_t rkey);
 int rdma_write(rdma_context_t *ctx, void *local_buf, size_t size,
                uint64_t remote_addr, uint32_t rkey);
+int rdma_write_imm(rdma_context_t *ctx, void *local_buf, size_t size,
+                   uint64_t remote_addr, uint32_t rkey, uint32_t imm_data);
+int rdma_recv_imm(rdma_context_t *ctx, void *buf, size_t size, uint32_t *imm_data);
 int rdma_cas(rdma_context_t *ctx, uint64_t remote_addr, uint32_t rkey,
              uint64_t expected, uint64_t desired, uint64_t *result);
 

@@ -114,6 +114,14 @@ kv_result_t hash_table_cas(hash_table_t *table, const char *key, size_t key_len,
 int hash_table_get_entry_addr(hash_table_t *table, const char *key, size_t key_len,
                               uint64_t *addr, size_t *size);
 
+// PUT 操作（使用预分配的内存，用于大数据 RDMA Write 场景）
+// @param value_ptr: 已分配的值存储地址（客户端已通过 RDMA Write 写入数据）
+// @param value_offset: 值在内存池中的偏移
+kv_result_t hash_table_put_with_allocated(hash_table_t *table, 
+                                          const char *key, size_t key_len,
+                                          void *value_ptr, size_t value_len,
+                                          uint64_t value_offset);
+
 // 哈希函数
 uint64_t hash_key(const char *key, size_t len);
 

@@ -914,6 +914,90 @@ int rdma_write(rdma_context_t *ctx, void *local_buf, size_t size,
     return rdma_poll_completion(ctx, RDMA_TIMEOUT_MS);
 }
 
+// RDMA Write with Immediate（带立即数的写操作）
+// 完成后会在远端的 Recv Queue 产生一个完成事件
+int rdma_write_imm(rdma_context_t *ctx, void *local_buf, size_t size,
+                   uint64_t remote_addr, uint32_t rkey, uint32_t imm_data) {
+    struct ibv_sge sge = {
+        .addr = (uint64_t)local_buf,
+        .length = size,
+        .lkey = ctx->mr->lkey,
+    };
+    
+    struct ibv_send_wr wr = {
+        .wr_id = (uint64_t)local_buf,
+        .sg_list = &sge,
+        .num_sge = 1,
+        .opcode = IBV_WR_RDMA_WRITE_WITH_IMM,
+        .send_flags = IBV_SEND_SIGNALED,
+        .imm_data = htonl(imm_data),  // 立即数需要网络字节序
+        .wr.rdma = {
+            .remote_addr = remote_addr,
+            .rkey = rkey,
+        },
+    };
+    
+    struct ibv_send_wr *bad_wr;
+    if (ibv_post_send(ctx->qp, &wr, &bad_wr)) {
+        fprintf(stderr, "Failed to post RDMA write with imm: %s\n", strerror(errno));
+        return -1;
+    }
+    
+    return rdma_poll_completion(ctx, RDMA_TIMEOUT_MS);
+}
+
+// 接收带立即数的 RDMA Write 完成通知
+// 当远端执行 write_imm 时，本端的 recv queue 会收到一个完成事件
+int rdma_recv_imm(rdma_context_t *ctx, void *buf, size_t size, uint32_t *imm_data) {
+    struct ibv_sge sge = {
+        .addr = (uint64_t)buf,
+        .length = size,
+        .lkey = ctx->mr->lkey,
+    };
+    
+    struct ibv_recv_wr wr = {
+        .wr_id = (uint64_t)buf,
+        .sg_list = &sge,
+        .num_sge = 1,
+    };
+    
+    struct ibv_recv_wr *bad_wr;
+    if (ibv_post_recv(ctx->qp, &wr, &bad_wr)) {
+        fprintf(stderr, "Failed to post recv for imm: %s\n", strerror(errno));
+        return -1;
+    }
+    
+    // 轮询完成队列，获取立即数
+    struct ibv_wc wc;
+    int polls = 0;
+    int max_polls = RDMA_TIMEOUT_MS * 1000;
+    
+    while (polls < max_polls) {
+        int ret = ibv_poll_cq(ctx->cq, 1, &wc);
+        if (ret < 0) {
+            fprintf(stderr, "Failed to poll CQ: %s\n", strerror(errno));
+            return -1;
+        }
+        if (ret > 0) {
+            if (wc.status != IBV_WC_SUCCESS) {
+                fprintf(stderr, "Work completion error: %s\n",
+                        ibv_wc_status_str(wc.status));
+                return -1;
+            }
+            // 检查是否是 RDMA Write with Immediate
+            if (wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM && imm_data) {
+                *imm_data = ntohl(wc.imm_data);
+            }
+            return 0;
+        }
+        usleep(1);
+        polls++;
+    }
+    
+    fprintf(stderr, "Polling timeout for recv_imm\n");
+    return -1;
+}
+
 // RDMA CAS（Compare and Swap）原子操作
 int rdma_cas(rdma_context_t *ctx, uint64_t remote_addr, uint32_t rkey,
              uint64_t expected, uint64_t desired, uint64_t *result) {

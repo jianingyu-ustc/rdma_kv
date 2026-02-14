@@ -44,33 +44,62 @@ static void* server_worker_thread(void *arg) {
                            memory_pool_get_base(server->mem_pool),
                            memory_pool_get_size(server->mem_pool));
         
-        // 发送远程内存信息给客户端
+        // 为该客户端分配专用写缓冲区（用于 1 RTT PUT）
+        // 缓冲区大小：最大支持 1MB 的 PUT 请求
+        #define CLIENT_WRITE_BUF_SIZE (1024 * 1024 + sizeof(rdma_msg_header_t) + 256)
+        void *client_write_buf = memory_pool_alloc(server->mem_pool, CLIENT_WRITE_BUF_SIZE);
+        
+        // 发送远程内存信息和写缓冲区地址给客户端
         rdma_mem_info_t mem_info = {
             .addr = (uint64_t)memory_pool_get_base(server->mem_pool),
             .rkey = client_ctx.mr->rkey,
             .size = memory_pool_get_size(server->mem_pool),
         };
         
+        client_write_buf_t write_buf_info = {
+            .write_buf_addr = (uint64_t)client_write_buf,
+            .write_buf_rkey = client_ctx.mr->rkey,
+            .write_buf_size = CLIENT_WRITE_BUF_SIZE,
+        };
+        
         rdma_msg_header_t header = {
             .msg_type = MSG_TYPE_RDMA_INFO,
         };
         
-        // 发送内存信息
-        memcpy(client_ctx.buf, &header, sizeof(header));
-        memcpy((char *)client_ctx.buf + sizeof(header), &mem_info, sizeof(mem_info));
-        rdma_send(&client_ctx, client_ctx.buf, sizeof(header) + sizeof(mem_info));
+        // 发送内存信息 + 写缓冲区信息
+        char init_buf[512];
+        memcpy(init_buf, &header, sizeof(header));
+        memcpy(init_buf + sizeof(header), &mem_info, sizeof(mem_info));
+        memcpy(init_buf + sizeof(header) + sizeof(mem_info), &write_buf_info, sizeof(write_buf_info));
+        rdma_send(&client_ctx, init_buf, sizeof(header) + sizeof(mem_info) + sizeof(write_buf_info));
         
         // 处理客户端请求
         while (server->running && client_ctx.connected) {
-            // 预先 post recv
+            // 尝试接收请求：可能是 Send 或 Write with Immediate
             char recv_buf[8192];
-            if (rdma_recv(&client_ctx, recv_buf, sizeof(recv_buf)) != 0) {
+            uint32_t imm_data = 0;
+            
+            // 使用 recv_imm 可以同时接收 Send 和 Write_imm
+            if (rdma_recv_imm(&client_ctx, recv_buf, sizeof(recv_buf), &imm_data) != 0) {
                 break;
             }
             
-            rdma_msg_header_t *req_header = (rdma_msg_header_t *)recv_buf;
-            char *key = recv_buf + sizeof(rdma_msg_header_t);
-            char *value = key + req_header->key_len;
+            rdma_msg_header_t *req_header;
+            char *key;
+            char *value;
+            
+            // 检查是否是 1 RTT 优化的请求（通过 write_imm 发送）
+            if (imm_data == MSG_TYPE_PUT_REQUEST) {
+                // 数据在预分配的写缓冲区中
+                req_header = (rdma_msg_header_t *)client_write_buf;
+                key = (char *)client_write_buf + sizeof(rdma_msg_header_t);
+                value = key + req_header->key_len;
+            } else {
+                // 普通 Send/Recv 请求
+                req_header = (rdma_msg_header_t *)recv_buf;
+                key = recv_buf + sizeof(rdma_msg_header_t);
+                value = key + req_header->key_len;
+            }
             
             rdma_msg_header_t resp_header = {0};
             char resp_buf[8192];
@@ -99,12 +128,69 @@ static void* server_worker_thread(void *arg) {
                 }
                 
                 case MSG_TYPE_PUT_REQUEST: {
-                    kv_result_t result = hash_table_put(server->hash_table,
-                                                       key, req_header->key_len,
-                                                       value, req_header->value_len);
-                    resp_header.msg_type = MSG_TYPE_PUT_RESPONSE;
-                    resp_header.status = result.status;
-                    resp_header.version = result.version;
+                    // 检查是否是 1 RTT 优化模式（通过 write_imm 发送）
+                    if (imm_data == MSG_TYPE_PUT_REQUEST) {
+                        // 1 RTT 模式：数据已经在预分配缓冲区中，直接存储
+                        kv_result_t result = hash_table_put(server->hash_table,
+                                                           key, req_header->key_len,
+                                                           value, req_header->value_len);
+                        resp_header.msg_type = MSG_TYPE_PUT_RESPONSE;
+                        resp_header.status = result.status;
+                        resp_header.version = result.version;
+                    } else if (req_header->value_len < RDMA_SMALL_DATA_THRESHOLD) {
+                        // 小数据：通过 Send/Recv 发送，value 在 recv_buf 中
+                        kv_result_t result = hash_table_put(server->hash_table,
+                                                           key, req_header->key_len,
+                                                           value, req_header->value_len);
+                        resp_header.msg_type = MSG_TYPE_PUT_RESPONSE;
+                        resp_header.status = result.status;
+                        resp_header.version = result.version;
+                    } else {
+                        // 旧模式大数据（兼容保留）：2 RTT 流程
+                        void *value_buf = memory_pool_alloc(server->mem_pool, req_header->value_len);
+                        if (!value_buf) {
+                            resp_header.msg_type = MSG_TYPE_PUT_RESPONSE;
+                            resp_header.status = KV_ERR_NO_MEMORY;
+                        } else {
+                            put_alloc_info_t alloc_info = {
+                                .remote_addr = (uint64_t)value_buf,
+                                .rkey = client_ctx.mr->rkey,
+                                .value_offset = (uint64_t)value_buf - (uint64_t)memory_pool_get_base(server->mem_pool),
+                            };
+                            
+                            rdma_msg_header_t alloc_resp = {
+                                .msg_type = MSG_TYPE_PUT_ALLOC_RESPONSE,
+                                .key_len = req_header->key_len,
+                                .value_len = req_header->value_len,
+                                .status = KV_OK,
+                            };
+                            
+                            char alloc_resp_buf[512];
+                            memcpy(alloc_resp_buf, &alloc_resp, sizeof(alloc_resp));
+                            memcpy(alloc_resp_buf + sizeof(alloc_resp), &alloc_info, sizeof(alloc_info));
+                            rdma_send(&client_ctx, alloc_resp_buf, sizeof(alloc_resp) + sizeof(alloc_info));
+                            
+                            char dummy_buf[64];
+                            uint32_t complete_imm = 0;
+                            if (rdma_recv_imm(&client_ctx, dummy_buf, sizeof(dummy_buf), &complete_imm) != 0 ||
+                                complete_imm != MSG_TYPE_PUT_COMPLETE) {
+                                memory_pool_free(server->mem_pool, value_buf);
+                                resp_header.msg_type = MSG_TYPE_PUT_RESPONSE;
+                                resp_header.status = KV_ERR_INTERNAL;
+                                break;
+                            }
+                            
+                            kv_result_t result = hash_table_put_with_allocated(
+                                server->hash_table,
+                                key, req_header->key_len,
+                                value_buf, req_header->value_len,
+                                alloc_info.value_offset);
+                            
+                            resp_header.msg_type = MSG_TYPE_PUT_RESPONSE;
+                            resp_header.status = result.status;
+                            resp_header.version = result.version;
+                        }
+                    }
                     break;
                 }
                 
@@ -323,6 +409,12 @@ int kv_client_connect(kv_client_t *client, const char *server_ip, int port) {
     if (header->msg_type == MSG_TYPE_RDMA_INFO) {
         rdma_mem_info_t *mem_info = (rdma_mem_info_t *)(recv_buf + sizeof(rdma_msg_header_t));
         client->rdma_ctx.remote_mem = *mem_info;
+        
+        // 解析写缓冲区信息（用于 1 RTT PUT）
+        client_write_buf_t *write_buf = (client_write_buf_t *)(recv_buf + sizeof(rdma_msg_header_t) + sizeof(rdma_mem_info_t));
+        client->write_buf = *write_buf;
+        printf("Got write buffer: addr=0x%lx, size=%u\n", 
+               client->write_buf.write_buf_addr, client->write_buf.write_buf_size);
     }
     
     client->connected = true;
@@ -374,6 +466,12 @@ int kv_client_connect_socket(kv_client_t *client, const char *server_ip, int por
     if (header->msg_type == MSG_TYPE_RDMA_INFO) {
         rdma_mem_info_t *mem_info = (rdma_mem_info_t *)(recv_buf + sizeof(rdma_msg_header_t));
         client->rdma_ctx.remote_mem = *mem_info;
+        
+        // 解析写缓冲区信息（用于 1 RTT PUT）
+        client_write_buf_t *write_buf = (client_write_buf_t *)(recv_buf + sizeof(rdma_msg_header_t) + sizeof(rdma_mem_info_t));
+        client->write_buf = *write_buf;
+        printf("Got write buffer: addr=0x%lx, size=%u\n", 
+               client->write_buf.write_buf_addr, client->write_buf.write_buf_size);
     }
     
     client->connected = true;
@@ -478,35 +576,52 @@ int kv_client_put(kv_client_t *client, const char *key, size_t key_len,
         
         return resp->status;
     } else {
-        // 大数据：使用 RDMA Write
-        // 1. 先请求服务端分配远程内存
-        // 2. 使用 RDMA Write 直接写入
-        // 3. 发送完成通知
+        // 大数据：使用 1 RTT 优化（write_imm -> recv）
+        // 直接写入服务端预分配的写缓冲区
         
-        // 这里简化实现，实际需要更复杂的协议
-        char *send_buf = (char *)memory_pool_alloc(client->mem_pool, 
-                                                    sizeof(rdma_msg_header_t) + key_len);
-        rdma_msg_header_t *header = (rdma_msg_header_t *)send_buf;
+        // 检查数据是否超过写缓冲区大小
+        size_t total_size = sizeof(rdma_msg_header_t) + key_len + value_len;
+        if (total_size > client->write_buf.write_buf_size) {
+            return KV_ERR_VALUE_TOO_LONG;
+        }
+        
+        // Step 1: 构建请求数据 [header][key][value]
+        void *local_buf = memory_pool_alloc(client->mem_pool, total_size);
+        if (!local_buf) {
+            return KV_ERR_NO_MEMORY;
+        }
+        
+        rdma_msg_header_t *header = (rdma_msg_header_t *)local_buf;
         header->msg_type = MSG_TYPE_PUT_REQUEST;
         header->key_len = key_len;
         header->value_len = value_len;
         
-        memcpy(send_buf + sizeof(rdma_msg_header_t), key, key_len);
+        memcpy((char *)local_buf + sizeof(rdma_msg_header_t), key, key_len);
+        memcpy((char *)local_buf + sizeof(rdma_msg_header_t) + key_len, value, value_len);
         
-        // 发送元数据
-        rdma_send(&client->rdma_ctx, send_buf, sizeof(rdma_msg_header_t) + key_len);
+        // Step 2: 使用 write_imm 直接写入服务端预分配缓冲区
+        // 立即数用于通知服务端有新请求
+        uint32_t imm_data = MSG_TYPE_PUT_REQUEST;
+        if (rdma_write_imm(&client->rdma_ctx, local_buf, total_size,
+                           client->write_buf.write_buf_addr,
+                           client->write_buf.write_buf_rkey,
+                           imm_data) != 0) {
+            memory_pool_free(client->mem_pool, local_buf);
+            return KV_ERR_INTERNAL;
+        }
         
-        // 使用 RDMA Write 写入数据
-        // rdma_write(&client->rdma_ctx, value, value_len, remote_addr, remote_rkey);
-        
-        // 接收确认
+        // Step 3: 接收响应
         char recv_buf[256];
-        rdma_recv(&client->rdma_ctx, recv_buf, sizeof(recv_buf));
+        if (rdma_recv(&client->rdma_ctx, recv_buf, sizeof(recv_buf)) != 0) {
+            memory_pool_free(client->mem_pool, local_buf);
+            return KV_ERR_INTERNAL;
+        }
         
         rdma_msg_header_t *resp = (rdma_msg_header_t *)recv_buf;
-        memory_pool_free(client->mem_pool, send_buf);
+        int status = resp->status;
         
-        return resp->status;
+        memory_pool_free(client->mem_pool, local_buf);
+        return status;
     }
 }
 

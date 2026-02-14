@@ -48,6 +48,9 @@ typedef struct kv_client {
     char server_ip[64];
     int server_port;
     bool connected;
+    
+    // 服务端预分配的写缓冲区（用于 1 RTT 优化）
+    client_write_buf_t write_buf;
 } kv_client_t;
 
 // ===================== 服务端 API =====================
